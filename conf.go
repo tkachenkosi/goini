@@ -1,4 +1,4 @@
-package ini
+package goini
 
 import (
 	"bufio"
