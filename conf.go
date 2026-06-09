@@ -1,36 +1,84 @@
+// Package goini
 package goini
 
 import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
 )
 
-const NAME_FL = ".ini"
-
 type conf struct {
-	secName  string
-	fileName string
-	result   map[string]string
+	confFile     string
+	sectionName  string
+	result       map[string]string
+	sectionFound bool
 }
 
+var UsedConfigPath string // заполняется в Load/SimpleLoad
+
+// getFileIniName возвращает путь файла конфигурации
+func getFileIniName() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "app.ini"
+	}
+	base := filepath.Base(exe)
+	ext := filepath.Ext(base)
+	app := strings.TrimSuffix(base, ext) // возвращает имя исполняемого файла без расширения
+	ini := app + ".ini"
+
+	// 3. Переменная окружения (высший приоритет)
+	if envPath := os.Getenv("APP_INI_CONFIG"); envPath != "" {
+		return envPath
+	}
+
+	// 2. Системный каталог
+	sysPath := filepath.Join("/usr/local/etc", app, ini)
+	if _, err := os.Stat(sysPath); err == nil {
+		return sysPath
+	}
+
+	// 1. Текущий каталог
+	if _, err := os.Stat(ini); err == nil {
+		return ini
+	}
+
+	// 0. Если не удалось создать – возвращаем
+	return "app.ini"
+}
+
+// Load возвращает структуру данных T переданных в параметрах
 func Load[T any]() (T, error) {
-	const msg_text = "ошибка преобразования значения для поля"
 	var cfg T
 
+	t := reflect.TypeOf(cfg)
+	if t.Kind() != reflect.Struct {
+		return cfg, fmt.Errorf("Load ожидает структуру, получен %v", t.Kind())
+	}
+	typeName := t.Name()
+	if typeName == "" {
+		// значение по умолчанию
+		// return cfg, fmt.Errorf("Load: анонимные структуры не поддерживаются (используйте именованную структуру)")
+		typeName = "main"
+	}
+
+	// 2. Парсим файл
+	UsedConfigPath = getFileIniName()
 	c := conf{
-		fileName: NAME_FL,
-		secName:  "[" + reflect.TypeOf(cfg).Name() + "]", // получение имени структуры оно же имя секции
-		result:   make(map[string]string, 2),
+		confFile:    UsedConfigPath,
+		sectionName: "[" + typeName + "]", // получение имени структуры оно же имя секции
+		result:      make(map[string]string, 2),
 	}
 
 	if err := c.parser(); err != nil {
 		return cfg, err
 	}
 
+	// 3. Заполняем структуру
 	v := reflect.ValueOf(&cfg).Elem()
 	for i := 0; i < v.NumField(); i++ {
 		field := v.Field(i) // Значение поля
@@ -42,11 +90,11 @@ func Load[T any]() (T, error) {
 			case reflect.String:
 				field.SetString(value)
 			case reflect.Int:
-				result, err := strconv.Atoi(value)
+				intVal, err := strconv.Atoi(value)
 				if err != nil {
-					return cfg, fmt.Errorf("%s %s: %v", msg_text, tag, err)
+					return cfg, fmt.Errorf("%s %s: %v", "ошибка преобразования значения для поля", tag, err)
 				}
-				field.SetInt(int64(result))
+				field.SetInt(int64(intVal))
 			default:
 				return cfg, fmt.Errorf("неподдерживаемый тип поля: %s", field.Kind())
 			}
@@ -56,12 +104,13 @@ func Load[T any]() (T, error) {
 	return cfg, nil
 }
 
-// упращенное чтение, возвращает map и только string
-func SimpleLoad(sec string) (map[string]string, error) {
+// SimpleLoad упращенное чтение, возвращает map и только string
+func SimpleLoad(section string) (map[string]string, error) {
+	UsedConfigPath = getFileIniName()
 	c := conf{
-		fileName: NAME_FL,
-		secName:  sec,
-		result:   make(map[string]string),
+		confFile:    UsedConfigPath,
+		sectionName: section,
+		result:      make(map[string]string),
 	}
 	if err := c.parser(); err != nil {
 		return nil, err
@@ -70,18 +119,7 @@ func SimpleLoad(sec string) (map[string]string, error) {
 }
 
 func (c *conf) parser() error {
-	var ok bool
-
-	// 1 - поиск файла .ini в текущем каталоге
-	if _, err := os.Stat(c.fileName); os.IsNotExist(err) {
-		// 2 - попытаемся найти конфиг в общей паке /usr/local/etc/<имя программы>/.ini
-		c.fileName = "/usr/local/etc/" + os.Args[0][strings.LastIndex(os.Args[0], "/")+1:] + "/" + c.fileName
-		if _, err := os.Stat(c.fileName); os.IsNotExist(err) {
-			return fmt.Errorf("файл конфигурации не найден: %s", c.fileName)
-		}
-	}
-
-	f, err := os.Open(c.fileName)
+	f, err := os.Open(c.confFile)
 	if err != nil {
 		return fmt.Errorf("ошибка открытия файла: %w", err)
 	}
@@ -95,16 +133,16 @@ func (c *conf) parser() error {
 			continue
 		}
 
-		if !ok && strings.Contains(line, c.secName) {
-			ok = true
+		if !c.sectionFound && strings.Contains(line, c.sectionName) {
+			c.sectionFound = true
 			continue
 		}
 
-		if ok && strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+		if c.sectionFound && strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
 			break // новая секция
 		}
 
-		if ok && strings.Contains(line, "=") {
+		if c.sectionFound && strings.Contains(line, "=") {
 			parts := strings.SplitN(line, "=", 2)
 			key := strings.TrimSpace(parts[0])
 			value := strings.TrimSpace(parts[1])
@@ -119,5 +157,8 @@ func (c *conf) parser() error {
 		return fmt.Errorf("ошибка чтения файла: %w", err)
 	}
 
+	if !c.sectionFound {
+		return fmt.Errorf("секция %s не найдена в файле %s", c.sectionName, c.confFile)
+	}
 	return nil
 }
