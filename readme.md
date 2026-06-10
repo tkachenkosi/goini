@@ -57,7 +57,7 @@ type web struct {
 ```
 #### Load a section:
 ```go
-import "github.com/yourusername/goini"
+import "github.com/tkachenkosi/goini"
 
 func main() {
     cfg, err := goini.Load[web]()
